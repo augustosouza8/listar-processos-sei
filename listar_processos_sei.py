@@ -41,6 +41,8 @@ except Exception:  # pragma: no cover - fallback defensivo
     Retry = None  # type: ignore[assignment,misc]
 
 
+# Carrega automaticamente um `.env` na raiz do projeto (se existir).
+# Isso permite rodar o script sem precisar exportar variáveis no terminal.
 load_dotenv()
 
 log = logging.getLogger("listar-processos-sei")
@@ -62,22 +64,23 @@ RE_TOOLTIP = re.compile(r"infraTooltipMostrar\('([^']*)',\s*'([^']*)'\)", re.I)
 
 
 class SEIError(RuntimeError):
-    pass
+    """Erro base para falhas relacionadas ao SEI neste script."""
 
 
 class SEIConfigError(SEIError):
-    pass
+    """Configuração ausente/inválida (ex.: variáveis obrigatórias não definidas)."""
 
 
 class SEILoginError(SEIError):
-    pass
+    """Falhas de autenticação (ex.: credenciais inválidas, conta bloqueada)."""
 
 
 class SEIProcessoError(SEIError):
-    pass
+    """Falhas ao acessar/paginar/listar processos (rede, parsing, paginação indisponível)."""
 
 
 def _str_to_bool(value: Optional[str]) -> Optional[bool]:
+    """Converte strings comuns para booleano, retornando None quando indefinido."""
     if value is None:
         return None
     value_norm = value.strip().lower()
@@ -92,6 +95,8 @@ def _str_to_bool(value: Optional[str]) -> Optional[bool]:
 
 @dataclass(frozen=True)
 class Settings:
+    """Configuração calculada a partir do ambiente (.env/variáveis de ambiente)."""
+
     orgao_value: str
     unidade_value: str
     base_url: str = DEFAULT_BASE_URL
@@ -102,14 +107,17 @@ class Settings:
 
     @property
     def login_url(self) -> str:
+        """URL completa de login (base + login_path)."""
         return f"{self.base_url}{self.login_path}"
 
     @property
     def unidade_alvo(self) -> str:
+        """Nome da unidade que deve ficar ativa após o login."""
         return self.unidade_value.strip()
 
 
 def load_settings() -> Settings:
+    """Lê variáveis obrigatórias do ambiente e constrói `Settings`."""
     orgao_value = os.environ.get("SEI_ORGAO")
     unidade_value = os.environ.get("SEI_UNIDADE")
 
@@ -123,6 +131,7 @@ def load_settings() -> Settings:
 
 
 def configure_logging(settings: Settings) -> None:
+    """Configura logging (INFO por padrão; DEBUG quando `SEI_DEBUG=1`)."""
     level = logging.DEBUG if settings.debug_enabled else logging.INFO
     logging.basicConfig(
         level=level,
@@ -132,12 +141,14 @@ def configure_logging(settings: Settings) -> None:
 
 
 def absolute_to_sei(settings: Settings, href: str) -> str:
+    """Converte `href` relativo do SEI em URL absoluta."""
     if href.startswith("http"):
         return href
     return urljoin(f"{settings.base_url}/sei/", href.lstrip("/"))
 
 
 def save_html(settings: Settings, path: Path, html: str) -> None:
+    """Salva HTML para debug quando `SEI_SAVE_DEBUG_HTML=1`."""
     if not settings.save_debug_html:
         return
     try:
@@ -149,6 +160,12 @@ def save_html(settings: Settings, path: Path, html: str) -> None:
 
 
 def create_session(settings: Settings) -> requests.Session:
+    """
+    Cria sessão HTTP com cabeçalhos, cookie do órgão e retries.
+
+    - O cookie `SIP_U_GOVMG_SEI` influencia o órgão selecionado no SEI.
+    - Retries ajudam com instabilidades (429/5xx), sem mascarar erros de login.
+    """
     session = requests.Session()
     session.headers.update(DEFAULT_HEADERS)
     if settings.orgao_value:
@@ -173,6 +190,7 @@ def create_session(settings: Settings) -> requests.Session:
 
 
 def serializar_inputs(form: Tag) -> Dict[str, str]:
+    """Serializa `<input>` (incluindo radio/checkbox) para um dict `name -> value`."""
     data: Dict[str, str] = {}
     for inp in form.find_all("input"):
         if not isinstance(inp, Tag):
@@ -191,6 +209,7 @@ def serializar_inputs(form: Tag) -> Dict[str, str]:
 
 
 def serializar_selects(form: Tag) -> Dict[str, str]:
+    """Serializa `<select>` para `name -> selected value`."""
     data: Dict[str, str] = {}
     for sel in form.find_all("select"):
         if not isinstance(sel, Tag):
@@ -207,6 +226,7 @@ def serializar_selects(form: Tag) -> Dict[str, str]:
 
 
 def serializar_textareas(form: Tag) -> Dict[str, str]:
+    """Serializa `<textarea>` para `name -> texto`."""
     data: Dict[str, str] = {}
     for ta in form.find_all("textarea"):
         if not isinstance(ta, Tag):
@@ -219,6 +239,11 @@ def serializar_textareas(form: Tag) -> Dict[str, str]:
 
 
 def processar_radios_nao_marcados(form: Tag, data: Dict[str, str]) -> Dict[str, str]:
+    """
+    Garante que grupos de radio tenham valor mesmo sem `checked`.
+
+    O SEI às vezes espera que o campo do radio seja enviado; este fallback usa o primeiro valor.
+    """
     radios_by_name: Dict[str, List[Tag]] = {}
     for radio in form.find_all("input", {"type": "radio"}):
         if not isinstance(radio, Tag):
@@ -234,6 +259,7 @@ def processar_radios_nao_marcados(form: Tag, data: Dict[str, str]) -> Dict[str, 
 
 
 def serializar_formulario(form: Tag) -> Dict[str, str]:
+    """Serializa inputs/selects/textareas em um payload de POST."""
     data: Dict[str, str] = {}
     data.update(serializar_inputs(form))
     data.update(serializar_selects(form))
@@ -242,6 +268,11 @@ def serializar_formulario(form: Tag) -> Dict[str, str]:
 
 
 def login_sei(session: requests.Session, settings: Settings, user: str, pwd: str) -> str:
+    """
+    Realiza login no SEI e retorna o HTML pós-login.
+
+    Observação: o SEI tipicamente responde em `iso-8859-1`, então o script força essa codificação.
+    """
     if not user or not pwd:
         raise SEILoginError("Usuário e senha devem ser fornecidos (SEI_USER/SEI_PASS).")
 
@@ -284,6 +315,7 @@ def login_sei(session: requests.Session, settings: Settings, user: str, pwd: str
 
 
 def descobrir_url_controle_do_html(settings: Settings, html: str) -> Optional[str]:
+    """Tenta localizar no HTML pós-login o link para 'Controle de Processos'."""
     try:
         soup = BeautifulSoup(html, "lxml")
         for tag in soup.find_all("a", href=True):
@@ -297,6 +329,7 @@ def descobrir_url_controle_do_html(settings: Settings, html: str) -> Optional[st
 
 
 def abrir_controle(session: requests.Session, settings: Settings, html_pos_login: str) -> tuple[str, str]:
+    """Abre a tela de Controle de Processos e retorna `(html, url)`."""
     try:
         url = descobrir_url_controle_do_html(settings, html_pos_login) or f"{settings.base_url}/sei/controlador.php?acao=procedimento_controlar"
         log.info("Acessando controle de processos: %s", url)
@@ -310,6 +343,11 @@ def abrir_controle(session: requests.Session, settings: Settings, html_pos_login
 
 
 def obter_unidade_atual(settings: Settings, html_controle: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extrai a unidade atual e a URL de troca de unidade.
+
+    O SEI expõe a troca de unidade via um `onclick` em `#lnkInfraUnidade`.
+    """
     try:
         soup = BeautifulSoup(html_controle, "lxml")
         anchor = soup.select_one("#lnkInfraUnidade")
@@ -335,6 +373,7 @@ def obter_unidade_atual(settings: Settings, html_controle: str) -> tuple[Optiona
 
 
 def carregar_pagina_selecao_unidades(session: requests.Session, settings: Settings, url_troca: str) -> str:
+    """Carrega a página que lista as unidades disponíveis para o usuário."""
     try:
         log.info("Carregando página de seleção de unidades: %s", url_troca)
         response = session.get(url_troca, timeout=30, headers=DEFAULT_HEADERS)
@@ -353,6 +392,11 @@ def selecionar_unidade_sei(
     unidade_desejada: str,
     url_troca_origem: str,
 ) -> tuple[bool, Optional[str]]:
+    """
+    Seleciona a unidade desejada na tela de unidades e retorna (sucesso, html_resultado).
+
+    Implementação baseada em scraping do formulário HTML do SEI.
+    """
     try:
         soup = BeautifulSoup(html_selecao, "lxml")
         tabela = soup.select_one("table[id^='infraTable'], table.infraTable")
@@ -433,6 +477,7 @@ def selecionar_unidade_sei(
 
 @dataclass
 class Processo:
+    """Modelo de processo (metadados que aparecem no Controle de Processos)."""
     numero_processo: str
     id_procedimento: str
     url: str
@@ -454,6 +499,7 @@ class Processo:
 
 @dataclass
 class PaginationInfo:
+    """Metadados de paginação inferidos da tela de Controle de Processos."""
     total_registros: int
     pagina_atual: int
     total_paginas: int
@@ -461,6 +507,7 @@ class PaginationInfo:
 
 
 def _get_attr_str(tag: Optional[Tag], attr: str, default: str = "") -> str:
+    """Obtém um atributo de uma Tag do BeautifulSoup garantindo retorno em string."""
     if not tag:
         return default
     value = tag.get(attr, default)
@@ -470,6 +517,7 @@ def _get_attr_str(tag: Optional[Tag], attr: str, default: str = "") -> str:
 
 
 def canonizar_processo(txt: str) -> str:
+    """Normaliza o número do processo (remove espaços inconsistentes e NBSP)."""
     txt = txt.replace("\xa0", " ")
     txt = re.sub(r"\.\s+", ".", txt)
     txt = re.sub(r"\s*/\s*", "/", txt)
@@ -478,6 +526,7 @@ def canonizar_processo(txt: str) -> str:
 
 
 def extrair_id_procedimento_da_url(url: str) -> str:
+    """Extrai `id_procedimento` dos parâmetros da URL do processo."""
     try:
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
@@ -487,6 +536,7 @@ def extrair_id_procedimento_da_url(url: str) -> str:
 
 
 def extrair_hash_da_url(url: str) -> str:
+    """Extrai `infra_hash` dos parâmetros da URL do processo."""
     try:
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
@@ -496,6 +546,7 @@ def extrair_hash_da_url(url: str) -> str:
 
 
 def parse_tooltip(onmouseover: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Extrai (titulo, tipo/especificidade) do tooltip do SEI."""
     if not onmouseover:
         return None, None
     match = RE_TOOLTIP.search(onmouseover)
@@ -507,6 +558,7 @@ def parse_tooltip(onmouseover: Optional[str]) -> tuple[Optional[str], Optional[s
 
 
 def extrair_processo_da_linha(settings: Settings, linha: Tag, categoria: Literal["Recebidos", "Gerados"]) -> Optional[Processo]:
+    """Converte uma `<tr>` do SEI em um `Processo`."""
     try:
         link_processo = linha.select_one('a[href*="acao=procedimento_trabalhar"]')
         if not link_processo or not isinstance(link_processo, Tag):
@@ -579,6 +631,7 @@ def extrair_processo_da_linha(settings: Settings, linha: Tag, categoria: Literal
 
 
 def extrair_processos(settings: Settings, html_controle: str) -> List[Processo]:
+    """Extrai processos (Recebidos e Gerados) do HTML da página de controle."""
     try:
         soup = BeautifulSoup(html_controle, "lxml")
         processos: List[Processo] = []
@@ -606,6 +659,7 @@ def extrair_processos(settings: Settings, html_controle: str) -> List[Processo]:
 
 
 def _parse_caption_info(texto: str) -> tuple[int, int]:
+    """Lê total de registros/itens por página a partir do texto do caption da tabela."""
     total_registros = 0
     itens_por_pagina = 0
 
@@ -626,6 +680,7 @@ def _parse_caption_info(texto: str) -> tuple[int, int]:
 
 
 def obter_paginacao_info(html_controle: str) -> Dict[str, PaginationInfo]:
+    """Lê os campos hidden/caption para inferir paginação de Recebidos/Gerados."""
     soup = BeautifulSoup(html_controle, "lxml")
     info: Dict[str, PaginationInfo] = {}
 
@@ -690,6 +745,11 @@ def submeter_paginacao(
     pagina_destino: int,
     controle_url: str,
 ) -> str:
+    """
+    Submete o formulário `frmProcedimentoControlar` para trocar a página de um grupo.
+
+    `pagina_destino` é 0-based (o SEI costuma trabalhar com índices numéricos internos).
+    """
     soup = BeautifulSoup(html_atual, "lxml")
     form = soup.select_one("#frmProcedimentoControlar")
     if not form:
@@ -725,6 +785,7 @@ def submeter_paginacao(
 
 
 def _adicionar_processos(destino: List[Processo], novos: Iterable[Processo]) -> None:
+    """Adiciona processos sem duplicar (chave por `id_procedimento`/`numero_processo`)."""
     vistos: Set[str] = {proc.id_procedimento or proc.numero_processo for proc in destino}
     for processo in novos:
         chave = processo.id_procedimento or processo.numero_processo
@@ -739,6 +800,11 @@ def coletar_processos_com_paginacao(
     html_inicial: str,
     controle_url: str,
 ) -> List[Processo]:
+    """
+    Coleta todos os processos navegando pelas páginas de Recebidos e Gerados.
+
+    O SEI tem paginação separada por grupo, então o script pagina cada um e acumula.
+    """
     processos: List[Processo] = []
 
     info_inicial = obter_paginacao_info(html_inicial)
@@ -778,6 +844,7 @@ def coletar_processos_com_paginacao(
 
 
 def exportar_processos_para_excel(processos: List[Processo], caminho: str) -> Path:
+    """Gera um `.xlsx` com 1 linha por processo e retorna o caminho final gravado."""
     if not processos:
         raise SEIProcessoError("Nenhum processo para exportar.")
 
@@ -837,6 +904,15 @@ def exportar_processos_para_excel(processos: List[Processo], caminho: str) -> Pa
 
 
 def executar_listagem(saida_xlsx: str) -> Path:
+    """
+    Orquestra o fluxo principal:
+
+    1) Login
+    2) Abre Controle de Processos
+    3) Troca unidade (se necessário)
+    4) Pagina e coleta todos os processos (Recebidos + Gerados)
+    5) Exporta para Excel
+    """
     settings = load_settings()
     configure_logging(settings)
 
@@ -885,6 +961,7 @@ def executar_listagem(saida_xlsx: str) -> Path:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parser de argumentos CLI (mantém o script simples, sem filtros de processos)."""
     parser = argparse.ArgumentParser(
         description="Lista todos os processos (Recebidos e Gerados) do SEI e exporta metadados para .xlsx.",
     )
@@ -897,6 +974,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """Entry point. Retorna código de saída para facilitar automação/CI local."""
     args = parse_args(argv)
     try:
         executar_listagem(args.saida)
