@@ -1,0 +1,15 @@
+# Ambiente / tooling local
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.egg-info/
+build/
+dist/
+
+# Artefatos gerados
+data/
+saida/
+*.xlsx
+*.pdf
